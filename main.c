@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <signal.h>
 
-// Estructura para almacenar la configuracion leida desde el archivo
+// config que sale del txt
 typedef struct {
     int seed;
     int delay_min;
@@ -15,11 +15,11 @@ typedef struct {
     int puma_init_y;
 } config_juego;
 
-// Control global del servidor y limite de mesas concurrentes
+// corte del servidor y cupo de mesas
 volatile sig_atomic_t servidor_activo = 1; 
 sem_t mesas_sem; 
 
-// Valores por defecto en caso de que no se pase config.txt
+// si no hay config.txt
 void inicializar_config_default(config_juego *c) {
     c->seed = 12345;
     c->delay_min = 50;
@@ -28,7 +28,7 @@ void inicializar_config_default(config_juego *c) {
     c->puma_init_y = 2;
 }
 
-// Lectura simple del archivo de configuracion
+// lee config si viene
 void leer_config(const char *filename, config_juego *c) {
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -46,7 +46,7 @@ void leer_config(const char *filename, config_juego *c) {
     fclose(file);
 }
 
-// 25 casillas de la grilla 5x5 + 3 casillas del trono superior
+// 25 del tablero + 3 del trono
 #define num_casillas 28 
 
 typedef enum { vacia, puma, perro } tipo_ficha;
@@ -54,7 +54,7 @@ typedef enum { vacia, puma, perro } tipo_ficha;
 typedef struct {
     tipo_ficha ocupante;
     int id_perro; 
-    pthread_mutex_t mutex_casilla; // Excl. mutua por casilla
+    pthread_mutex_t mutex_casilla;
 } casilla;
 
 typedef struct {
@@ -62,17 +62,16 @@ typedef struct {
     int capturas_puma;
     int perros_vivos;
     int partida_activa;
-    int puma_conectado;    // Estado de conexion del puma (1: ok, 0: desconectado)
-    int perros_conectados; // Conteo de perros conectados
+    int puma_conectado;
+    int perros_conectados;
     pthread_mutex_t mutex_estado;
 } estado_mesa;
 
-// Coloca al puma en la posicion inicial y a los 12 perros en la parte inferior
+// puma arriba, perros abajo
 void colocar_fichas_iniciales(estado_mesa *mesa, config_juego *config) {
     int pos_puma = (config->puma_init_y * 5) + config->puma_init_x;
     mesa->tablero[pos_puma].ocupante = puma;
     
-    // Llenamos de abajo hacia arriba los 12 perros
     int perros_colocados = 0;
     for (int i = 24; i >= 0 && perros_colocados < 12; i--) {
         if (mesa->tablero[i].ocupante == vacia) {
@@ -83,7 +82,7 @@ void colocar_fichas_iniciales(estado_mesa *mesa, config_juego *config) {
     }
 }
 
-// Verifica si dos casillas son adyacentes en la grilla 5x5
+// vecinas en el 5x5
 int es_adyacente(int origen, int destino) {
     if (origen < 0 || origen >= num_casillas || destino < 0 || destino >= num_casillas) {
         return 0;
@@ -117,7 +116,7 @@ void inicializar_tablero(estado_mesa *mesa) {
     }
 }
 
-// Ordenamiento de menor a mayor indice para evitar Deadlocks al bloquear casillas
+// orden fijo para no deadlock
 void bloquear_casillas(estado_mesa *mesa, int c1, int c2) {
     int primero = (c1 < c2) ? c1 : c2;
     int segundo = (c1 < c2) ? c2 : c1;
@@ -132,7 +131,7 @@ void desbloquear_casillas(estado_mesa *mesa, int c1, int c2) {
     pthread_mutex_unlock(&mesa->tablero[primero].mutex_casilla);
 }
 
-// Calcula la casilla sobre la cual se salta en un movimiento de captura
+// casilla saltada o -1
 int obtener_casilla_intermedia(int origen, int destino) {
     if (origen >= 25 || destino >= 25) return -1; 
     int x1 = origen % 5, y1 = origen / 5;
@@ -145,13 +144,12 @@ int obtener_casilla_intermedia(int origen, int destino) {
     return -1;
 }
 
-// Movimiento atomico con sincronizacion por mutex
+// mueve con mutex
 int intentar_movimiento(estado_mesa *mesa, int origen, int destino, tipo_ficha tipo, int id_perro) {
     int exito = 0;
     int casilla_intermedia = (tipo == puma) ? obtener_casilla_intermedia(origen, destino) : -1;
 
     if (casilla_intermedia != -1) {
-        // Bloqueo ordenado de 3 casillas para evitar deadlock durante el salto del puma
         int casillas[3] = {origen, destino, casilla_intermedia};
         for (int i = 0; i < 2; i++) {
             for (int j = i + 1; j < 3; j++) {
@@ -210,13 +208,13 @@ typedef struct {
 
 void destruir_tablero(estado_mesa *mesa);
 
-// Simula la velocidad de decision/movimiento de cada ficha
+// espera random
 void retardo_aleatorio(config_juego *config) {
     int retardo_ms = config->delay_min + rand() % (config->delay_max - config->delay_min + 1);
     usleep(retardo_ms * 1000); 
 }
 
-// Revisa si al puma le queda al menos un movimiento o salto valido disponible
+// hay movida?
 int puma_tiene_movimientos(estado_mesa *mesa, int pos_puma) {
     for (int destino = 0; destino < num_casillas; destino++) {
         if (mesa->tablero[destino].ocupante == vacia) {
@@ -227,7 +225,7 @@ int puma_tiene_movimientos(estado_mesa *mesa, int pos_puma) {
             }
         }
     }
-    return 0; // Puma totalmente acorralado
+    return 0;
 }
 
 void* hilo_puma(void* arg) {
@@ -245,7 +243,7 @@ void* hilo_puma(void* arg) {
         }
         
         if (pos_actual != -1) {
-            // Si no tiene movimientos posibles, ganan los perros por acorralamiento
+            // sin movidas, pierde
             if (!puma_tiene_movimientos(args->mesa, pos_actual)) {
                 args->mesa->partida_activa = 0;
                 break;
@@ -257,7 +255,7 @@ void* hilo_puma(void* arg) {
             }
         }
         
-        // Condicion de victoria del puma (6 o mas capturas)
+        // gana con 6 capturas
         if (args->mesa->capturas_puma >= 6) {
             args->mesa->partida_activa = 0;
         }
@@ -291,7 +289,7 @@ void* hilo_perro(void* arg) {
     return NULL;
 }
 
-// Representacion visual en consola del estado del tablero
+// dibujo en consola
 void imprimir_tablero(estado_mesa *mesa, int id_mesa) {
     printf("\n--- ESTADO MESA %d ---\n", id_mesa);
     char c[num_casillas];
@@ -301,11 +299,9 @@ void imprimir_tablero(estado_mesa *mesa, int id_mesa) {
         else c[i] = '.';
     }
     
-    // Imprimir el trono (indices 25, 26, 27)
     printf("        %c        \n", c[27]);
     printf("      %c   %c      \n", c[25], c[26]);
     
-    // Imprimir la grilla de 5x5 (indices 0 al 24)
     for(int y = 0; y < 5; y++) {
         printf("    ");
         for(int x = 0; x < 5; x++) {
@@ -344,7 +340,6 @@ void* hilo_juez(void* arg) {
     while (mesa.partida_activa && servidor_activo) {
         imprimir_tablero(&mesa, args->id_mesa);
         
-        // Monitoreo de desconexiones
         if (!mesa.puma_conectado) {
             printf("[MESA %d] Victoria para los perros por abandono del puma.\n", args->id_mesa);
             mesa.partida_activa = 0;
@@ -370,13 +365,13 @@ void* hilo_juez(void* arg) {
     return NULL;
 }
 
-// Captura SIGINT (Ctrl+C) para cerrar el servidor de forma ordenada
+// ctrl+c
 void manejador_sigint(int sig) {
     (void)sig;
     servidor_activo = 0;
 }
 
-// Destruccion de mutexes al finalizar la partida
+// libera mutex
 void destruir_tablero(estado_mesa *mesa) {
     pthread_mutex_destroy(&mesa->mutex_estado);
     for (int i = 0; i < num_casillas; i++) {
@@ -413,7 +408,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < partidas_totales; i++) {
         if (!servidor_activo) break;
 
-        // Limita el número de mesas concurrentes a M mediante el semáforo
+        // el semaforo limita cuantas mesas corren a la vez
         sem_wait(&mesas_sem);
 
         argumentos_mesa *args = malloc(sizeof(argumentos_mesa));
