@@ -1,8 +1,3 @@
-/*
-==============================================================
-PARTE DE LA RUBRICA: 1.1 COMPILACION, EJECUCION Y CONFIGURACION
-==============================================================
-*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +6,7 @@ PARTE DE LA RUBRICA: 1.1 COMPILACION, EJECUCION Y CONFIGURACION
 #include <unistd.h>
 #include <signal.h>
 
-// configuracion inicial del juego[cite: 2]
+// Estructura para almacenar la configuracion leida desde el archivo
 typedef struct {
     int seed;
     int delay_min;
@@ -20,10 +15,11 @@ typedef struct {
     int puma_init_y;
 } config_juego;
 
-// variables globales y senales
+// Control global del servidor y limite de mesas concurrentes
 volatile sig_atomic_t servidor_activo = 1; 
 sem_t mesas_sem; 
 
+// Valores por defecto en caso de que no se pase config.txt
 void inicializar_config_default(config_juego *c) {
     c->seed = 12345;
     c->delay_min = 50;
@@ -32,10 +28,11 @@ void inicializar_config_default(config_juego *c) {
     c->puma_init_y = 2;
 }
 
+// Lectura simple del archivo de configuracion
 void leer_config(const char *filename, config_juego *c) {
     FILE *file = fopen(filename, "r");
     if (!file) {
-        perror("error al abrir config. usando defaults.");
+        perror("[config] No se pudo abrir el archivo, usando valores por defecto");
         return;
     }
     char buffer[256];
@@ -49,13 +46,7 @@ void leer_config(const char *filename, config_juego *c) {
     fclose(file);
 }
 
-/*
-==============================================================
-PARTE DE LA RUBRICA: 1.2 TABLERO Y REGLAS BASICAS
-==============================================================
-*/
-
-// "el tablero esta conformado por una cuadricula principal de 5x5 intersecciones acoplada en su extremo superior a un triangulo o trono"[cite: 1]
+// 25 casillas de la grilla 5x5 + 3 casillas del trono superior
 #define num_casillas 28 
 
 typedef enum { vacia, puma, perro } tipo_ficha;
@@ -63,26 +54,25 @@ typedef enum { vacia, puma, perro } tipo_ficha;
 typedef struct {
     tipo_ficha ocupante;
     int id_perro; 
-    pthread_mutex_t mutex_casilla; 
+    pthread_mutex_t mutex_casilla; // Excl. mutua por casilla
 } casilla;
 
-// "el estado del tablero debe ser compartido entre las fichas concurrentes de cada partida."[cite: 1]
 typedef struct {
     casilla tablero[num_casillas];
     int capturas_puma;
     int perros_vivos;
     int partida_activa;
-    int puma_conectado;    // 1: conectado, 0: desconectado
-    int perros_conectados; // cantidad de perros activos
+    int puma_conectado;    // Estado de conexion del puma (1: ok, 0: desconectado)
+    int perros_conectados; // Conteo de perros conectados
     pthread_mutex_t mutex_estado;
 } estado_mesa;
 
-// "disposicion inicial de fichas en el tablero."[cite: 2]
+// Coloca al puma en la posicion inicial y a los 12 perros en la parte inferior
 void colocar_fichas_iniciales(estado_mesa *mesa, config_juego *config) {
     int pos_puma = (config->puma_init_y * 5) + config->puma_init_x;
     mesa->tablero[pos_puma].ocupante = puma;
     
-    // 12 perros en la parte inferior
+    // Llenamos de abajo hacia arriba los 12 perros
     int perros_colocados = 0;
     for (int i = 24; i >= 0 && perros_colocados < 12; i--) {
         if (mesa->tablero[i].ocupante == vacia) {
@@ -93,12 +83,11 @@ void colocar_fichas_iniciales(estado_mesa *mesa, config_juego *config) {
     }
 }
 
-// "se mueven a casillas adyacentes libres."[cite: 2]
+// Verifica si dos casillas son adyacentes en la grilla 5x5
 int es_adyacente(int origen, int destino) {
     if (origen < 0 || origen >= num_casillas || destino < 0 || destino >= num_casillas) {
         return 0;
     }
-    // cuadricula 5x5 (indices 0 al 24)
     if (origen < 25 && destino < 25) {
         int x1 = origen % 5;
         int y1 = origen / 5;
@@ -113,13 +102,6 @@ int es_adyacente(int origen, int destino) {
     return 0; 
 }
 
-
-/*
-===================================================================
-PARTE DE LA RUBRICA: 2.2 SINCRONIZACION Y CONSISTENCIA DEL TABLERO
-===================================================================
-*/
-// "1. inicializa el tablero y sus primitivas de sincronizacion."[cite: 3]
 void inicializar_tablero(estado_mesa *mesa) {
     mesa->capturas_puma = 0;
     mesa->perros_vivos = 12;
@@ -135,11 +117,10 @@ void inicializar_tablero(estado_mesa *mesa) {
     }
 }
 
-// "identificar los potenciales escenarios de deadlock... y explicar la estrategia implementada"[cite: 4]
+// Ordenamiento de menor a mayor indice para evitar Deadlocks al bloquear casillas
 void bloquear_casillas(estado_mesa *mesa, int c1, int c2) {
     int primero = (c1 < c2) ? c1 : c2;
     int segundo = (c1 < c2) ? c2 : c1;
-    // "garantizar la exclusion mutua durante los movimientos simultaneos"[cite: 4]
     pthread_mutex_lock(&mesa->tablero[primero].mutex_casilla);
     pthread_mutex_lock(&mesa->tablero[segundo].mutex_casilla);
 }
@@ -151,7 +132,7 @@ void desbloquear_casillas(estado_mesa *mesa, int c1, int c2) {
     pthread_mutex_unlock(&mesa->tablero[primero].mutex_casilla);
 }
 
-// "el sistema de sincronizacion debe garantizar que solo una adquiera la posicion, evitando condiciones de carrera"[cite: 2]
+// Calcula la casilla sobre la cual se salta en un movimiento de captura
 int obtener_casilla_intermedia(int origen, int destino) {
     if (origen >= 25 || destino >= 25) return -1; 
     int x1 = origen % 5, y1 = origen / 5;
@@ -164,15 +145,21 @@ int obtener_casilla_intermedia(int origen, int destino) {
     return -1;
 }
 
+// Movimiento atomico con sincronizacion por mutex
 int intentar_movimiento(estado_mesa *mesa, int origen, int destino, tipo_ficha tipo, int id_perro) {
     int exito = 0;
     int casilla_intermedia = (tipo == puma) ? obtener_casilla_intermedia(origen, destino) : -1;
 
     if (casilla_intermedia != -1) {
+        // Bloqueo ordenado de 3 casillas para evitar deadlock durante el salto del puma
         int casillas[3] = {origen, destino, casilla_intermedia};
         for (int i = 0; i < 2; i++) {
             for (int j = i + 1; j < 3; j++) {
-                if (casillas[i] > casillas[j]) { int temp = casillas[i]; casillas[i] = casillas[j]; casillas[j] = temp; }
+                if (casillas[i] > casillas[j]) { 
+                    int temp = casillas[i]; 
+                    casillas[i] = casillas[j]; 
+                    casillas[j] = temp; 
+                }
             }
         }
         pthread_mutex_lock(&mesa->tablero[casillas[0]].mutex_casilla);
@@ -210,13 +197,6 @@ int intentar_movimiento(estado_mesa *mesa, int origen, int destino, tipo_ficha t
     return exito;
 }
 
-
-/*
-===================================================================
-PARTE DE LA RUBRICA: 2.3 JUEZ, REGISTRO Y TERMINO DE PARTIDAS
-===================================================================
-*/
-
 typedef struct {
     int id_mesa;
     config_juego config;
@@ -228,26 +208,26 @@ typedef struct {
     config_juego *config;
 } argumentos_ficha;
 
-// andaba tirando error pq no puse esto antes de todo
 void destruir_tablero(estado_mesa *mesa);
 
-// "cada pieza intenta realizar movimientos ejecutando ciclos de decision con retardos aleatorios en milisegundos (entre 50 y 300 ms)."[cite: 2]
+// Simula la velocidad de decision/movimiento de cada ficha
 void retardo_aleatorio(config_juego *config) {
     int retardo_ms = config->delay_min + rand() % (config->delay_max - config->delay_min + 1);
     usleep(retardo_ms * 1000); 
 }
 
+// Revisa si al puma le queda al menos un movimiento o salto valido disponible
 int puma_tiene_movimientos(estado_mesa *mesa, int pos_puma) {
     for (int destino = 0; destino < num_casillas; destino++) {
         if (mesa->tablero[destino].ocupante == vacia) {
-            if (es_adyacente(pos_puma, destino)) return 1; // Puede dar un paso normal
+            if (es_adyacente(pos_puma, destino)) return 1; 
             if (obtener_casilla_intermedia(pos_puma, destino) != -1 && 
                 mesa->tablero[obtener_casilla_intermedia(pos_puma, destino)].ocupante == perro) {
-                return 1; // Puede saltar sobre un perro
+                return 1; 
             }
         }
     }
-    return 0; // Puma acorralado
+    return 0; // Puma totalmente acorralado
 }
 
 void* hilo_puma(void* arg) {
@@ -265,7 +245,7 @@ void* hilo_puma(void* arg) {
         }
         
         if (pos_actual != -1) {
-            // "victoria de los perros: acorralar completamente al puma, dejandolo sin movimientos validos posibles."[cite: 2]
+            // Si no tiene movimientos posibles, ganan los perros por acorralamiento
             if (!puma_tiene_movimientos(args->mesa, pos_actual)) {
                 args->mesa->partida_activa = 0;
                 break;
@@ -277,7 +257,7 @@ void* hilo_puma(void* arg) {
             }
         }
         
-        // "victoria del puma: capturar a 6 o mas perros."[cite: 2]
+        // Condicion de victoria del puma (6 o mas capturas)
         if (args->mesa->capturas_puma >= 6) {
             args->mesa->partida_activa = 0;
         }
@@ -292,7 +272,6 @@ void* hilo_perro(void* arg) {
     while (args->mesa->partida_activa && servidor_activo) {
         retardo_aleatorio(args->config);
         
-        // Buscar la posicion actual de este perro especifico
         int pos_actual = -1;
         for (int i = 0; i < num_casillas; i++) {
             if (args->mesa->tablero[i].ocupante == perro && args->mesa->tablero[i].id_perro == args->id) {
@@ -302,7 +281,6 @@ void* hilo_perro(void* arg) {
         }
         
         if (pos_actual != -1) {
-            // Intentar moverse a una casilla adyacente aleatoria
             int destino_intento = rand() % num_casillas;
             if (es_adyacente(pos_actual, destino_intento)) {
                 intentar_movimiento(args->mesa, pos_actual, destino_intento, perro, args->id);
@@ -313,13 +291,7 @@ void* hilo_perro(void* arg) {
     return NULL;
 }
 
-/*
-===================================================================
-PARTE DE LA RUBRICA: 2.3 JUEZ, REGISTRO Y TERMINO DE PARTIDAS
-( ESTO ES PA Q SE VEA VISUAL )
-===================================================================
-*/
-// "3. simulacion visual/log del juego: la mesa debe imprimir/simular periodicamente o ante cada movimiento el estado actualizado del tablero"[cite: 3]
+// Representacion visual en consola del estado del tablero
 void imprimir_tablero(estado_mesa *mesa, int id_mesa) {
     printf("\n--- ESTADO MESA %d ---\n", id_mesa);
     char c[num_casillas];
@@ -329,11 +301,11 @@ void imprimir_tablero(estado_mesa *mesa, int id_mesa) {
         else c[i] = '.';
     }
     
-    // imprimir el trono (indices 25, 26, 27)
+    // Imprimir el trono (indices 25, 26, 27)
     printf("        %c        \n", c[27]);
     printf("      %c   %c      \n", c[25], c[26]);
     
-    // imprimir la cuadricula 5x5 (indices 0 al 24)
+    // Imprimir la grilla de 5x5 (indices 0 al 24)
     for(int y = 0; y < 5; y++) {
         printf("    ");
         for(int x = 0; x < 5; x++) {
@@ -341,7 +313,7 @@ void imprimir_tablero(estado_mesa *mesa, int id_mesa) {
         }
         printf("\n");
     }
-    printf("capturas puma: %d | perros vivos: %d\n", mesa->capturas_puma, mesa->perros_vivos);
+    printf("Capturas Puma: %d | Perros Vivos: %d\n", mesa->capturas_puma, mesa->perros_vivos);
     printf("----------------------\n");
 }
 
@@ -372,14 +344,14 @@ void* hilo_juez(void* arg) {
     while (mesa.partida_activa && servidor_activo) {
         imprimir_tablero(&mesa, args->id_mesa);
         
-        // Deteccion de desconexiones repentinas (Resiliencia)
+        // Monitoreo de desconexiones
         if (!mesa.puma_conectado) {
-            printf("[MESA %d] victoria para los perros por abandono del puma.\n", args->id_mesa);
+            printf("[MESA %d] Victoria para los perros por abandono del puma.\n", args->id_mesa);
             mesa.partida_activa = 0;
             break;
         }
         if (mesa.perros_conectados < 12) {
-            printf("[MESA %d] victoria para el puma por abandono de un perro.\n", args->id_mesa);
+            printf("[MESA %d] Victoria para el puma por abandono de un perro.\n", args->id_mesa);
             mesa.partida_activa = 0;
             break;
         }
@@ -398,22 +370,13 @@ void* hilo_juez(void* arg) {
     return NULL;
 }
 
-/*
-===================================================================
-PARTE DE LA RUBRICA: 
-1.3 EMPAREJAMIENTO Y MESAS 
-2.1 LIMITE DE MESAS  
-2.4 FALLOS, SIGINT Y LIMPIEZA 
-===================================================================
-*/
-
-// "si el usuario envia una senal sigint (ctrl+c) al proceso principal: el servidor debe detener inmediatamente la llegada de nuevos jugadores."[cite: 3]
+// Captura SIGINT (Ctrl+C) para cerrar el servidor de forma ordenada
 void manejador_sigint(int sig) {
     (void)sig;
     servidor_activo = 0;
 }
 
-// "4. el programa debe finalizar garantizando cero fugas de memoria (memory leaks) y cero recursos huerfanos en el sistema operativo."[cite: 3]
+// Destruccion de mutexes al finalizar la partida
 void destruir_tablero(estado_mesa *mesa) {
     pthread_mutex_destroy(&mesa->mutex_estado);
     for (int i = 0; i < num_casillas; i++) {
@@ -423,7 +386,7 @@ void destruir_tablero(estado_mesa *mesa) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3 || argc > 4) {
-        fprintf(stderr, "uso: %s n m [config.txt]\n", argv[0]);
+        fprintf(stderr, "Uso: %s N M [config.txt]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -444,14 +407,13 @@ int main(int argc, char *argv[]) {
         leer_config(argv[3], &configuracion);
     }
 
-    // "el servidor debe emparejarlos en grupos de 2 (un jugador puma y un jugador perros) y asignarles una mesa de juego disponible."[cite: 3]
     int partidas_totales = n / 2; 
     pthread_t jueces[partidas_totales];
 
     for (int i = 0; i < partidas_totales; i++) {
         if (!servidor_activo) break;
 
-        // "si las m mesas estan ocupadas, los pares restantes deben esperar de forma pasiva."[cite: 3]
+        // Limita el número de mesas concurrentes a M mediante el semáforo
         sem_wait(&mesas_sem);
 
         argumentos_mesa *args = malloc(sizeof(argumentos_mesa));
